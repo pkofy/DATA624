@@ -1,0 +1,409 @@
+---
+title: 'Project 2: Predictive Model of PH'
+author: "Deepa Sharma, William Aiken, Ahmed Elsaeyed, Diana Plunkett, PK O'Flaherty"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    collapse: no
+    code_folding: hide
+  pdf_document:
+    toc: yes
+---
+
+<!---
+This is role playing.  I am your new boss.  I am in charge of production at ABC Beverage and you are a team of data scientists reporting to me.  My leadership has told me that new regulations are requiring us to understand our manufacturing process, the predictive factors and be able to report to them our predictive model of PH.
+
+Please use the historical data set I am providing.  Build and report the factors in BOTH a technical and non-technical report.  I like to use Word and Excel.  Please provide your non-technical report in a business friendly readable document and your predictions in an Excel readable format. The technical report should show clearly the models you tested and how you selected your final approach.
+
+Please submit both Rpubs links and .rmd files or other readable formats for technical and non-technical reports.  Also submit the excel file showing the prediction of your models for pH.
+
+If needed, add this to create a code appendix
+```{r ref.label=knitr::all_labels(), echo=TRUE, eval=FALSE}
+```
+--->
+
+<br>
+<hr>
+<br>
+
+# Project Introduction
+
+New regulations are requiring ABC Beverage to provide a report with an outline of our manufacturing process, and a predictive model of PH including an explanation of predictive factors.
+
+Our data science team is tasked with developing the predictive model from provided historical data and using that model to predict PH on test data.
+
+<br>
+
+# Data
+
+## Import Data
+
+```{r, message=FALSE}
+
+# Check out packages
+library(readxl)
+library(tidyverse)
+
+# Load data
+df <- read.csv('https://raw.githubusercontent.com/deepasharma06/Data-624/refs/heads/main/StudentData_training.csv')
+
+df_test <- read.csv('https://raw.githubusercontent.com/deepasharma06/Data-624/refs/heads/main/StudentEvaluation_test.csv')
+
+```
+
+<br>
+
+## View Data
+
+```{r}
+
+# View data
+str(df)
+
+```
+
+<br>
+
+## Domain Dive
+
+We looked for a general understanding of bottling manufacturing and learned a few things potentially about our data, so these are our assumptions and guesses.
+
+This data describes a continuous bottling process, like a conveyor belt, and so `Mnf Flow` would be the percentage of intended speed the process is running at.  
+
+`Fill.Ounces` is how full the bottles bottles are being filled to with a target of 24 oz.
+
+`Alch.Rel` sounds like this could be an relative value of alcohol.  I checked and Modelo produces cans of 24 ounce spiked sparkling water, so maybe it's a similar product.
+
+`Brand.Code` could be in label only but if it's different formulas and flavors, the specific ratios of acids (citric, phosphoric, malic) to create the brand's flavor profile, then it would definitely affect PH.
+
+`PH` is the PH of our bottled beverage.  Curiously we would expect carbonated beverages to be acidic because carbon in water makes carbonic acid however all of the PH values are in the 8 range which is basic. 7 is neutral and below 7 would be acidic.
+
+`Mnf.Flow` seems to be the speed of the conveyor belt or manufacturing flow represented as a percentage of the ideal speed.  `MFR` could be the actual speed.
+
+`Carb.Volume`, `Carb.Pressure`, `Carb.Temp` we could potentially combine with the formula P*V/T to obtain the amount of carbon being injected into the liquid.
+
+`Bowl.Setpoint` is consistently 120 and we believe it's how high the bottle is expected to be filled.  `Filler.Level` is a variable close to 120 which is presumably the actual amount filled.  Dividing `Bowl.Setpoint` by `Filler Level` could agregate the predictors into whether too much or too little was added.
+
+`Filler.Speed` seems to be the speed at which the fill liquid is filled.  And `Carb.Flow` seems to be the speed at which the carbonation is injected.
+
+`Carb.Pressure1` and `Fill.Pressure` look to be the pressure at which the carbonation (~120) is injected into the fill liquid and the fill liquid's pressure (~46).  Those values make sense because if the C02's pressure is not higher than the liquid, the liquid won't carbonate.
+
+`Pressure.Setpoint` seems to be the setting for `Fill.Pressure` that the manufacturing process is trying to match.
+
+`Balling` is a reference to the Balling scale which was a way to determine how much sugar is in a syrup based on the density of the liquid.  `Balling.Lvl` is related.
+
+`Temperature` is in fahrenheit (~66) but isn't clear if that's the ambient temperature and should be aggregated with `Air.Pressurer` (~144) to get a sense of what the surrounding pressure is, which could influence how much carbonation stays in the bottle.
+
+`PSC.CO2` could be the purity of the carbon dioxide, variations in which would have a big impact on the final PH.  `PSC.Fill` could be the purity of the water. and `PSC` a combined metric of purity. But this is just a guess.
+
+This leaves a lot variables without a clear picture of how they fit into the manufacturing process:
+
+`PC.Volume`  
+`Hyd.Pressure1` `Hyd.Pressure2` `Hyd.Pressure3` `Hyd.Pressure4`  
+`Usage.cont` `Density` `Pressure.Vacuum` `Oxygen.Filler` `Carb.Rel`
+
+<br>
+
+## Missing Data
+
+17.2% of our rows have missing data (442/2571) so we won't just drop all rows with missing data.
+
+***
+Internal note:
+I reran this and it went from 533 to 442.  I don't know if that's because of loading the data from csv or because I just reinstalled RStudio and R=442/2571
+***
+
+```{r}
+
+# 442 rows have missing data
+#df %>%
+#  filter(if_any(everything(), is.na)) %>%
+#  nrow()
+
+# Display columns by missingness
+df %>%
+  summarise(across(everything(), ~ sum(is.na(.)), .names = "missing_{.col}")) %>%
+  pivot_longer(everything(), names_to = "Column", values_to = "Missing_Count") %>%
+  arrange(desc(Missing_Count))
+
+```
+
+<br>
+
+## Impute missing values (NAs)
+
+Here we impute the missing values using kNN and then check that the 533 missing values are filled in.
+
+```{r, warning=FALSE, message=FALSE}
+
+# Check out packages
+library(caret)
+library(RANN)
+
+```
+
+```{r}
+
+# Produce the model that can impute values using kNN
+imputeModel <- preProcess(df, method = c("knnImpute"))
+
+# Impute the missing values for the training data
+dfi <- predict(imputeModel, df)
+
+# Impute the missing values for the test data
+dfi_test <- predict(imputeModel, df_test)
+
+```
+
+<br>
+
+## Correlation matrix
+
+```{r, message=FALSE}
+library(corrplot)
+```
+
+```{r}
+# Calculate correlation matrix
+correlations <- cor(dfi[, sapply(dfi, is.numeric)])
+
+# Plot correlation matrix
+corrplot(correlations, method = "square", type = "lower", order = "original", 
+         tl.cex = 0.8, tl.col = "black", cl.cex = 0.8)
+```
+
+<br>
+
+## Outliers
+
+What we are seeing is a lot of outliers specifically for variables where the majority of their values are zero.  It's possible we will use near-zero variance filtering to resolve these.
+
+```{r, message=FALSE, warning=FALSE}
+library(gridExtra)
+```
+
+
+```{r, warning=FALSE}
+
+# Create boxplots for each numeric column
+numeric_columns <- names(dfi)[sapply(dfi, is.numeric)]
+plot_list <- lapply(numeric_columns[1:9], function(col) {
+  ggplot(dfi, aes_string(y = col)) +
+    geom_boxplot(outlier.color = "red", fill = "lightblue") +
+    ggtitle(paste("Boxplot of", col)) +
+    theme_minimal()
+})
+
+# Display all boxplots in a grid
+do.call(grid.arrange, c(plot_list, ncol = 3))
+
+```
+
+<br>
+
+## Transformations
+
+Because Box-Cox transformations only work on positive values and our data includes many zeros and negative values we can only Center and Scale our data.
+
+<br>
+
+## Degenerate predictors
+
+***
+Internal Note:
+placeholder - consider looking if any of the variables have less than 1% (or 10%) of their values as a particular value but skipping
+***
+
+<br>
+
+## Near zero variables
+
+`Hyd.Pressure1` is the only variable identified as a problematic predictor using near zero variance filtering and so we are removing it.
+
+```{r, message=FALSE, warning=FALSE}
+library(knitr)
+```
+
+```{r}
+# Count number of problematic predictors
+#length(nearZeroVar(dfi))
+
+# Remove problematic predictors
+dfiz <- dfi[, -nearZeroVar(dfi)]
+
+# Remove problematic predictor from test data
+dfiz_test <- dfi_test[, -13]
+
+# Display number of remaining predictors
+#kable(data.frame(Predictors = ncol(dfiz)), align="c")
+```
+
+<br>
+
+## Split up data
+
+Here we split up the data so that PH is our `trainy` and the remaining data is our `trainx`.  Similarly for our test data we have `testx` and `testy`.
+
+```{r}
+# split up available data into trainx, trainy, and testx
+trainx <- dfiz[, -25]
+trainy <- dfiz[, 25]
+testx <- dfiz_test[, -25]
+testy <- dfiz_test[, 25]
+
+```
+
+<br>
+
+## One-hot encoding
+
+We have one character variable `Brand.Code` that is categorial with no inherent order:
+
+Blank - 120
+A - 293
+B - 1239
+C - 304
+D - 615
+
+Here we set the Blanks to brand code `M` for miscellaneous and use one-hot encoding to split them up into five variables with a `1` in the column corresponding to which Brand Code that row is.
+
+```{r}
+
+# Assign blanks as "M"
+trainx$Brand.Code[trainx$Brand.Code == ""] <- "M"
+testx$Brand.Code[testx$Brand.Code == ""] <- "M"
+
+# Convert Brand.Code to a factor
+trainx$Brand.Code <- as.factor(trainx$Brand.Code)
+testx$Brand.Code <- as.factor(testx$Brand.Code)
+
+# One-hot encoding
+dummy_model <- dummyVars(~ ., data = trainx)
+trainx <- predict(dummy_model, trainx)
+testx <- predict(dummy_model, testx)
+
+```
+
+<br>
+
+## Feature engineering
+
+After preparing our domain-specific knowledge one interaction term we could create would be to make a `Carb` variable by multiplying `Carb.Pressure` and `Carb.Volume` and dividing by `Carb.Temp`.  This is the Ideal Gas Law and would tell us how much carbon dioxide is being injected.
+
+***
+WIP
+***
+
+```{r}
+
+# Add the new predictor `Carb` to the test data
+#trainx$Carb <- (trainx$Carb.Pressure * trainx$Carb.Volume) / trainx$Carb.Temp
+#testx$Carb <- (testx$Carb.Pressure * testx$Carb.Volume) / testx$Carb.Temp
+
+# Remove the three variables from test data
+#trainx <- trainx[, !names(trainx) %in% c("Carb.Pressure", "Carb.Volume", "Carb.Temp")]
+#testx <- testx[, !names(testx) %in% c("Carb.Pressure", "Carb.Volume", "Carb.Temp")]
+
+```
+
+<br>
+<hr>
+<br>
+
+# Modeling
+
+Here we look at the kNN, SVM and MARS models.  Performance could be improved with better feature engineering.
+
+<br>
+
+## kNN
+
+k-Nearest Neighbors results in a weak model with an Rsquared of 0.4623 when run with five as the number of nearest neighbors.  
+
+```{r}
+# Train the kNN model
+knnModel <- train(x = trainx,
+                  y = trainy,
+                  method = "knn",
+                  preProc = c("center", "scale"),
+                  tuneLength = 10)
+knnModel
+```
+
+<br>
+
+## Support Vector Machines
+
+Support Vector Machines results in a weak model with an Rsquared of 0.5830 when C = 8.  The C being high like this means that misclassifications are penalized more heavily resulting in a more complex decision boundary.
+
+```{r, message=FALSE}
+library(kernlab)
+```
+
+```{r}
+# Train the SVM model
+svmModel <- train(x = trainx,
+                  y = trainy,
+                  method = "svmRadial",
+                  preProc = c("center", "scale"),
+                  tuneLength = 14,
+                  trControl = trainControl(method = "cv"))
+svmModel
+```
+
+<br>
+
+### MARS
+
+Multivariate Adaptive Regression Splines results in a weak model with an Rsquared of 0.5168 with nprune = 33 and degree = 6.  This means there are 33 basis functions with six-way interactions.  This may be suitable to highly nonlinear and interactive data but risks overfitting.
+
+```{r, message=FALSE}
+library(earth)
+```
+
+```{r}
+# Train the MARS model
+marsGrid <- expand.grid(.degree = 6, .nprune = 30:40)
+set.seed(175175327)
+marsModel <- train(x = trainx,
+                   y = trainy,
+                   method = "earth",
+                   tuneGrid = marsGrid,
+                   trControl = trainControl(method = "cv"))
+marsModel
+```
+
+<br>
+
+### XGBoost
+
+eXtreme Gradient Boosting also produced similarly weak results with an Rsquared of 0.4459, which leaves us to consider improving the model through feature engineering.
+
+```{r, message=FALSE}
+library(xgboost)
+```
+
+```{r}
+library(caret)
+
+# Train XGBoost model using caret
+xgb_model <- train(
+  x = trainx,
+  y = trainy,
+  method = "xgbTree",
+  tuneLength = 1,  # Automatic hyperparameter tuning
+  trControl = trainControl(method = "cv", number = 10)  # Cross-validation
+)
+
+# Summary of the model
+print(xgb_model)
+
+```
+
+<br>
+<hr>
+<br>
+
+
