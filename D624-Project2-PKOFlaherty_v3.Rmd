@@ -1,0 +1,619 @@
+---
+title: 'Project 2: Predictive Model of PH'
+author: "Deepa Sharma, William Aiken, Ahmed Elsaeyed, Diana Plunkett, PK O'Flaherty"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    collapse: no
+    code_folding: hide
+  pdf_document:
+    toc: yes
+---
+
+<!---
+This is role playing.  I am your new boss.  I am in charge of production at ABC Beverage and you are a team of data scientists reporting to me.  My leadership has told me that new regulations are requiring us to understand our manufacturing process, the predictive factors and be able to report to them our predictive model of PH.
+
+Please use the historical data set I am providing.  Build and report the factors in BOTH a technical and non-technical report.  I like to use Word and Excel.  Please provide your non-technical report in a business friendly readable document and your predictions in an Excel readable format. The technical report should show clearly the models you tested and how you selected your final approach.
+
+Please submit both Rpubs links and .rmd files or other readable formats for technical and non-technical reports.  Also submit the excel file showing the prediction of your models for pH.
+
+--->
+
+<br>
+<hr>
+<br>
+
+# Project Introduction
+
+New regulations are requiring ABC Beverage to provide a report with an outline of our manufacturing process, and a predictive model of PH including an explanation of predictive factors.
+
+Our data science team is tasked with developing the predictive model from provided historical data and using that model to predict PH on test data.
+
+```{r include=FALSE}
+
+# Checking out packages
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE) 
+
+library(corrplot)
+library(reshape2)  # for melt
+library(ggplot2)   # for ggplot
+library(dplyr)
+library(knitr)
+library(magrittr)
+library(tidyverse) # for code with missing values
+library(caret)     # for models
+library(RANN)      # for better kNN imputation
+library(gridExtra) # for Outliers
+library(car)       # VIF
+library(earth)     # MARS model
+library(kernlab)   # SVM model
+library(xgboost)   # XGBoost model
+
+```
+
+<br>
+<hr>
+<br>
+
+# Data
+
+Here we import our train and test data, `student_train` and `student_eval`, and evaluate for missing data and additional exploratory steps.
+
+<br>
+
+## Data Acquisition
+
+Here we can preview the data structure:
+
+```{r}
+
+student_train = read.csv('https://raw.githubusercontent.com/deepasharma06/Data-624/refs/heads/main/StudentData_training.csv')
+
+student_eval = read.csv('https://raw.githubusercontent.com/deepasharma06/Data-624/refs/heads/main/StudentEvaluation_test.csv')
+
+head(student_train) %>% kable()
+
+```
+
+<br>
+
+## Domain Dive
+
+We looked for a general understanding of bottling manufacturing and learned a few things potentially about our data, so these are our assumptions and guesses.
+
+This data describes a continuous bottling process, like a conveyor belt, and so `Mnf Flow` would be the percentage of intended speed the process is running at.  
+
+`Fill.Ounces` is how full the bottles bottles are being filled to with a target of 24 oz.
+
+`Alch.Rel` sounds like this could be an relative value of alcohol.  I checked and Modelo produces cans of 24 ounce spiked sparkling water, so maybe it's a similar product.
+
+`Brand.Code` could be in label only but if it's different formulas and flavors, the specific ratios of acids (citric, phosphoric, malic) to create the brand's flavor profile, then it would definitely affect PH.
+
+`PH` is the PH of our bottled beverage.  Curiously we would expect carbonated beverages to be acidic because carbon in water makes carbonic acid however all of the PH values are in the 8 range which is basic. 7 is neutral and below 7 would be acidic.
+
+`Mnf.Flow` seems to be the speed of the conveyor belt or manufacturing flow represented as a percentage of the ideal speed.  `MFR` could be the actual speed.
+
+`Carb.Volume`, `Carb.Pressure`, `Carb.Temp` we could potentially combine with the formula P*V/T to obtain the amount of carbon being injected into the liquid.
+
+`Bowl.Setpoint` is consistently 120 and we believe it's how high the bottle is expected to be filled.  `Filler.Level` is a variable close to 120 which is presumably the actual amount filled.  Dividing `Bowl.Setpoint` by `Filler Level` could agregate the predictors into whether too much or too little was added.
+
+`Filler.Speed` seems to be the speed at which the fill liquid is filled.  And `Carb.Flow` seems to be the speed at which the carbonation is injected.
+
+`Carb.Pressure1` and `Fill.Pressure` look to be the pressure at which the carbonation (~120) is injected into the fill liquid and the fill liquid's pressure (~46).  Those values make sense because if the C02's pressure is not higher than the liquid, the liquid won't carbonate.
+
+`Pressure.Setpoint` seems to be the setting for `Fill.Pressure` that the manufacturing process is trying to match.
+
+`Balling` is a reference to the Balling scale which was a way to determine how much sugar is in a syrup based on the density of the liquid.  `Balling.Lvl` is related.
+
+`Temperature` is in fahrenheit (~66) but isn't clear if that's the ambient temperature and should be aggregated with `Air.Pressurer` (~144) to get a sense of what the surrounding pressure is, which could influence how much carbonation stays in the bottle.
+
+`PSC.CO2` could be the purity of the carbon dioxide, variations in which would have a big impact on the final PH.  `PSC.Fill` could be the purity of the water. and `PSC` a combined metric of purity. But this is just a guess.
+
+This leaves a lot variables without a clear picture of how they fit into the manufacturing process:
+
+`PC.Volume`  
+`Hyd.Pressure1` `Hyd.Pressure2` `Hyd.Pressure3` `Hyd.Pressure4`  
+`Usage.cont` `Density` `Pressure.Vacuum` `Oxygen.Filler` `Carb.Rel`
+
+<br>
+
+## Missing values
+
+In total there are 724 missing values across 442 rows.
+
+17.2% of our rows have missing data (442/2571) so we won't just drop all rows with missing data.
+
+Here we show columns with the highest number of missing values:
+
+```{r}
+
+# There are 724 NA values
+#sum(is.na(student_train))
+
+# 442 rows have missing data
+#student_train %>%
+#  filter(if_any(everything(), is.na)) %>%
+#  nrow()
+
+# Display columns by missingness
+student_train %>%
+  summarise(across(everything(), ~ sum(is.na(.)), .names = "missing_{.col}")) %>%
+  pivot_longer(everything(), names_to = "Column", values_to = "Missing_Count") %>%
+  arrange(desc(Missing_Count))
+
+```
+
+<br>
+
+## Impute missing values (NAs)
+
+Here we impute the missing values using kNN and then check that the 724 missing values in `student_train` and the 366 missing values in `student_eval` are filled in.
+
+```{r}
+
+# Produce the model that can impute values using kNN
+imputeModel <- preProcess(student_train, method = c("knnImpute"))
+
+# Impute the missing values for the training and test data
+student_train <- predict(imputeModel, student_train)
+student_eval <- predict(imputeModel, student_eval)
+
+# There are now zero NA values in our train and test data
+#sum(is.na(student_train))
+#sum(is.na(student_eval))
+
+```
+
+<br>
+
+## Correlation Plot
+
+In our correlation plot we are comparing values in the second to last `PH` column.  We note `Filler.Level` and `Bowl.Setpoint` which are highly collinear have some positive correlation with `PH`.  Also, a number of variables have negative correlation with `PH`, most notably `Mnf.Flow`, `Hyd.Pressure3`, and `Pressure.Setpoint`.
+
+```{r}
+# Select only numeric columns
+numeric_data <- student_train %>% select(where(is.numeric))
+
+# Calculate the correlation matrix
+correlation_matrix <- cor(numeric_data, use = "pairwise.complete.obs")
+
+# Create the correlation plot
+corrplot(correlation_matrix, tl.col = "black", tl.cex = 0.6, order = 'AOE')
+```
+
+<br>
+
+## Distribution Visualization
+
+Here we show distributions of the variables as histograms.  Note, `Brand.Code` is excluded because it doesn't have the numeric data.
+
+```{r, warning=FALSE}
+
+# Melt the data
+mlt.train <- student_train  # Use your actual dataframe name
+mlt.train$ID <- rownames(mlt.train)  # Assign row names to ID
+mlt.train <- melt(mlt.train, id.vars = "ID")
+
+# Convert the value column to numeric
+mlt.train$value <- as.numeric(mlt.train$value)
+
+# Create histograms of the predictors
+ggplot(data = mlt.train, aes(x = value)) +
+  geom_histogram(binwidth = 6, fill = "skyblue", color = "black", alpha = 0.8) +  # Adjust binwidth as needed
+  facet_wrap(~ variable, scales = "free") +
+  labs(title = "Distributions of Predictors", x = "Predictors", y = "Frequency") +
+  theme_minimal(base_size = 9) +  # Use a minimal theme for better clarity
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  # Clean up grid lines
+
+```
+
+<br>
+
+## Outliers
+
+We are seeing a lot of outliers in the boxplots, specifically for variables where the majority of their values are zero.  It's possible we will use near-zero variance filtering to resolve these.  Below only the first 9 of 32 are shown for display purposes but the pattern is the same.
+
+```{r, warning=FALSE}
+
+# Create boxplots for each numeric column
+numeric_columns <- names(student_train)[sapply(student_train, is.numeric)]
+plot_list <- lapply(numeric_columns[1:9], function(col) {
+  ggplot(student_train, aes_string(y = col)) +
+    geom_boxplot(outlier.color = "red", fill = "lightblue") +
+    ggtitle(paste("Boxplot of", col)) +
+    theme_minimal()
+})
+
+# Display all boxplots in a grid
+do.call(grid.arrange, c(plot_list, ncol = 3))
+
+```
+
+<br>
+<hr>
+<br>
+
+# Feature Engineering
+
+Here we use feature engineering and regression techniques to evaluate our feature set.
+
+<br>
+
+## Initial Linear Regression Model
+
+Here we build the initial linear regression model.
+
+```{r}
+
+# Setting up the model
+model <- lm(PH ~ ., data = student_train)
+summary(model)
+
+```
+
+<br>
+
+## Variance Inflation Factor (VIF)
+
+With the above initial linear regression model we can access the Variance Inflation Factor (VIF) to detect multicollinearity in our regression model to help us select features.
+
+Note, we see that `Brand.Code` is highly collinear.
+
+```{r}
+
+# Calculating VIF
+vif_values <- vif(model)
+vif_values
+
+```
+
+<br>
+
+## Near-Zero Variance
+
+Next we check if any of the variables have a near zero variance and surprisingly only one variable, `Hyd.Pressure1`, is identified by default.  We changed the parameters 'freqCut' and 'uniqueCut' but it required large changes to pick up the other variables, so we kept to only removing `Hyd.Pressure1`. 
+
+```{r}
+
+# Remove problematic predictors from train and test data
+student_train_x <- student_train[, -nearZeroVar(student_train)]
+student_eval_y <- student_eval[, -13]
+
+# Display extended list of NZV predictors
+nearZeroVar(student_train, freqCut = 60/40, uniqueCut = 40, names = TRUE)
+
+```
+
+<br>
+
+## Reduce Multicollinearity
+
+Three features, `Brand.Code`, `Balling`, and `Balling.Lvl`, have high multicollinearity which we will address in this section.
+
+<br>
+
+### Brand.Code
+
+Here we replace `Brand.Code` with `BCB` which will show if the record is brand code B or not.  When we reran for individual values of `Brand.Code`, we see that Brand B appears to have a different relationship than the other brands, Brand B has a R-squared of ~0.7 while all the other brands have a R-squared of ~0.3.  This suggests, we can replace all the brands with a binary variable of whether it is Brand B or not. (not pictured)
+
+From this we identify that `Balling` and `Balling.Lvl` represent a lot of the remaining multicollinearity to be reduced.
+
+```{r}
+
+# Replacing Brand.Code with BCB
+student_train_x1 <- student_train_x |> mutate(BCB = as.numeric(Brand.Code =='B')) |> select(-Brand.Code)
+student_eval_y1 <- student_eval_y |> mutate(BCB = as.numeric(Brand.Code =='B')) |> select(-Brand.Code)
+
+# New model with BCB instead of Brand.Code
+model <- lm(PH ~ ., data = student_train_x)
+#summary(model)
+
+# Calculating VIF
+vif_values <- vif(model)
+vif_values
+
+```
+
+<br>
+
+### Balling vs. Balling.Lvl
+
+In order to reduce the multicollinearity we are going to create a new predictor by dividing `Balling.Lvl` with `Balling`.
+
+The division was arrived at after trying different operations and division resulted in the best correlation to `PH` then removing either individually.
+
+For a guess at domain relevance, `Balling.Lvl` could be the target best value for the syrup's specific gravity and `Balling` could be the actual, so dividing the two would result in a value similar to `Mnf.Flow` which is a percentage of the ideal manufacturing conveyor belt speed.
+
+```{r}
+
+# Create new predictor PT
+student_train_x2 <- student_train_x1 |> mutate(PT = Balling.Lvl/Balling) |> select(-c(Balling, Balling.Lvl))
+student_eval_y2 <- student_eval_y1 |> mutate(PT = Balling.Lvl/Balling) |> select(-c(Balling, Balling.Lvl))
+
+```
+
+<br>
+
+## Interaction Terms
+
+We also considered creating a `Carbon` column by multiplying `Carb.Pressure` and `Carb.Volume` and dividing by `Carb.Temp`.  This is the Ideal Gas Law and would tell us how much carbon dioxide is being injected.  However there are two values for pressure, `Carb.Pressure` and `Carb.Pressure1` and we don't have the units to combine them according to the law.  From inspection they look like they've already been centered and scaled and so cannot be combined.
+
+<br>
+
+## Step-wise Reduction
+
+Since we've somewhat resolved our multicollinearity issue and have enough data we're going to try a step-wise reduction model.  This reduces our features to just the ones that have relevance for this model.  Since we're not relying on this to produce our final model but rather evaluating our features, step-wise reduction aligns with our goals and we don't need to try regularization instead.
+
+Note, our model has terrible performance with an R-Squared of ~0.41, but we've acquainted ourselves with the features and figured out how to resolve multicollinearity.
+
+```{r}
+
+# Fit a step-wise linear regression model
+model <- lm(PH ~ ., data = student_train_x2)
+model <- stats::step(model, trace = 0)
+summary(model)
+
+```
+
+<br>
+<hr>
+<br>
+
+# Initial MARS Model
+
+Here we produce a Multivariate Adaptive Regression Splines (MARS) model to capture some of these non-linear interactions in our data.
+
+<br>
+
+## Feature Selection
+
+We're using the features selected in the step-wise linear regression model.
+    
+```{r}
+
+# Features used in the previous step-wise linear regression model
+student_train_x3 <- student_train_x2 |>
+    select(PH, Fill.Ounces, PC.Volume, Carb.Temp, PSC, 
+    PSC.Fill, PSC.CO2, Mnf.Flow, Carb.Pressure1, Fill.Pressure, 
+    Hyd.Pressure2, Hyd.Pressure3, Filler.Level, Temperature, 
+    Usage.cont, Carb.Flow, Density, MFR, Oxygen.Filler, 
+    Bowl.Setpoint, Pressure.Setpoint, Alch.Rel, Carb.Rel, BCB)
+
+student_eval_y3 <- student_eval_y2 |> 
+    select(PH, Fill.Ounces, PC.Volume, Carb.Temp, PSC, 
+    PSC.Fill, PSC.CO2, Mnf.Flow, Carb.Pressure1, Fill.Pressure, 
+    Hyd.Pressure2, Hyd.Pressure3, Filler.Level, Temperature, 
+    Usage.cont, Carb.Flow, Density, MFR, Oxygen.Filler, 
+    Bowl.Setpoint, Pressure.Setpoint, Alch.Rel, Carb.Rel, BCB)
+
+```
+
+<br>
+
+## 1st Order MARS Model
+
+Here we run the initial MARS Model with only first order relationships.
+
+```{r}
+
+# Basic MARS Model
+y = student_train_x3$PH
+x = student_train_x3 |> select(-PH)
+marsFit <- earth(x, y)
+summary(marsFit)
+
+```
+
+<br>
+
+### Show Plots
+
+And here we show the partial dependence plots of the first order MARS model.
+
+```{r}
+plotmo(marsFit)
+```
+
+<br>
+
+## 2nd Order MARS Model
+
+Here we run the initial MARS Model with second order relationships.  This increased the R-squared from 0.475 to .489.
+
+```{r}
+
+y = student_train_x3$PH
+x = student_train_x3 |> select(-PH)
+
+y_eval = student_eval_y3$PH
+x_eval = student_eval_y3 |> select(-PH)
+
+marsFit2 <- earth(x, y, degree = 2)
+summary(marsFit2)
+
+```
+
+<br>
+
+### Show Plots
+
+```{r}
+plotmo(marsFit2)
+```
+
+<br>
+
+## Predictions
+
+When we originally completed the above model we got an R-Squared of 0.89 however it was a fluke and the R-Squared on the test data was a lowly 0.342, substantiating significant overfitting of our model.
+
+We could duplicate that result by replacing the imputation of missing values with zeros, not removing the one feature with near-zero variance, and doing the balling vs. balling.lvl feature combination after the step-wise reduction.
+
+Instead, we're using our current model and will take a different tack starting in the next section.
+
+Here we make predictions on our test data using the current model and then compare that to our test data and get an R-Squared on the test data of 0.379, compared to the initial overfit model of 0.342.
+
+```{r}
+
+# Make Predictions
+predicted <- stats::predict(marsFit2, student_eval_y3)
+
+# Actual values
+actual <- student_eval_y3$PH
+
+# R-squared
+rss <- sum((actual - predicted)^2) # Residual sum of squares
+tss <- sum((actual - mean(actual))^2) # Total sum of squares
+rsquared <- 1 - (rss / tss)
+
+# Display R-squared
+rsquared
+```
+
+<br>
+<hr>
+<br>
+
+# Non-Linear Models
+
+Here we're doing a range of models to get a sense of what works.
+
+<br>
+
+## Data
+
+We're starting over on the data after the imputation step and removing the one near-zero variance predictor.
+
+<br>
+
+### Split up data
+
+Here we split up the data so that PH is our `trainy` and the remaining data is our `trainx`.  Similarly for our test data we have `testx` and `testy`.
+
+```{r}
+
+# Split up available data into train and test versions of x and y
+trainx <- student_train_x |> select(-PH)
+trainy <- student_train_x$PH
+testx <- student_eval_y |> select(-PH)
+testy <- student_eval_y$PH
+
+```
+
+<br>
+
+### One-hot encoding
+
+We have one character variable `Brand.Code` that is categorial with no inherent order:
+
+Blank - 120
+A - 293
+B - 1239
+C - 304
+D - 615
+
+Here we set the Blanks to brand code `M` for miscellaneous and use one-hot encoding to split them up into five variables with a `1` in the column corresponding to which Brand Code that row is.
+
+```{r}
+
+# Assign blanks as "M"
+trainx$Brand.Code[trainx$Brand.Code == ""] <- "M"
+testx$Brand.Code[testx$Brand.Code == ""] <- "M"
+
+# Convert Brand.Code to a factor
+trainx$Brand.Code <- as.factor(trainx$Brand.Code)
+testx$Brand.Code <- as.factor(testx$Brand.Code)
+
+# One-hot encoding
+dummy_model <- dummyVars(~ ., data = trainx)
+trainx <- predict(dummy_model, trainx)
+testx <- predict(dummy_model, testx)
+
+```
+
+<br>
+
+## Modeling
+
+Here we look at the kNN, SVM and MARS models.
+
+<br>
+
+## kNN
+
+k-Nearest Neighbors results in a weak model with an R-Squared of 0.481 when run with 13 as the number of nearest neighbors.  
+
+```{r}
+# Train the kNN model
+knnModel <- train(x = trainx,
+                  y = trainy,
+                  method = "knn",
+                  preProc = c("center", "scale"),
+                  tuneLength = 10)
+knnModel
+```
+
+<br>
+
+## Support Vector Machines
+
+Support Vector Machines results in a weak model with an Rsquared of 0.586 when C = 8.  The C being high like this means that misclassifications are penalized more heavily resulting in a more complex decision boundary.
+
+```{r}
+# Train the SVM model
+svmModel <- train(x = trainx,
+                  y = trainy,
+                  method = "svmRadial",
+                  preProc = c("center", "scale"),
+                  tuneLength = 14,
+                  trControl = trainControl(method = "cv"))
+svmModel
+```
+
+<br>
+
+### MARS
+
+Multivariate Adaptive Regression Splines results in a weak model with an Rsquared of 0.517 with nprune = 33 and degree = 6.  This means there are 33 basis functions with six-way interactions.  This may be suitable to highly nonlinear and interactive data but risks overfitting.
+
+```{r}
+# Train the MARS model
+marsGrid <- expand.grid(.degree = 6, .nprune = 30:40)
+set.seed(175175327)
+marsModel <- train(x = trainx,
+                   y = trainy,
+                   method = "earth",
+                   tuneGrid = marsGrid,
+                   trControl = trainControl(method = "cv"))
+marsModel
+```
+
+<br>
+
+### XGBoost
+
+eXtreme Gradient Boosting also produced similarly weak results with an R-Squared of 0.455.
+
+```{r}
+library(caret)
+
+# Train XGBoost model using caret
+xgb_model <- train(
+  x = trainx,
+  y = trainy,
+  method = "xgbTree",
+  tuneLength = 1,  # Automatic hyperparameter tuning
+  trControl = trainControl(method = "cv", number = 10)  # Cross-validation
+)
+
+# Summary of the model
+print(xgb_model)
+
+```
+
+<br>
+<hr>
+<br>
+
