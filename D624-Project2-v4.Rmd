@@ -1,0 +1,1307 @@
+---
+title: 'Project 2: Predictive Model of PH'
+author: "Deepa Sharma, William Aiken, Ahmed Elsaeyed, Diana Plunkett, PK O'Flaherty"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+    toc_float: yes
+    collapse: no
+    code_folding: hide
+  pdf_document:
+    toc: yes
+---
+
+<!---
+This is role playing.  I am your new boss.  I am in charge of production at ABC Beverage and you are a team of data scientists reporting to me.  My leadership has told me that new regulations are requiring us to understand our manufacturing process, the predictive factors and be able to report to them our predictive model of PH.
+
+Please use the historical data set I am providing.  Build and report the factors in BOTH a technical and non-technical report.  I like to use Word and Excel.  Please provide your non-technical report in a business friendly readable document and your predictions in an Excel readable format. The technical report should show clearly the models you tested and how you selected your final approach.
+
+Please submit both Rpubs links and .rmd files or other readable formats for technical and non-technical reports.  Also submit the excel file showing the prediction of your models for pH.
+
+--->
+
+<br>
+<hr>
+<br>
+
+# Project Introduction:
+
+New regulations are requiring ABC Beverage to provide a report with an outline of our manufacturing process, and a predictive model of PH including an explanation of predictive factors.
+
+Our data science team is tasked with developing the predictive model from provided historical data and using that model to predict PH on test data.
+
+```{r, message=FALSE, warning=FALSE}
+
+# Checking out packages
+knitr::opts_chunk$set(echo = TRUE, warning = FALSE, message = FALSE) 
+
+library(corrplot)
+library(reshape2)  # for melt
+library(ggplot2)   # for ggplot
+library(dplyr)
+library(knitr)
+library(magrittr)
+library(tidyverse) # for code with missing values
+library(caret)     # for models
+library(RANN)      # for better kNN imputation
+library(gridExtra) # for Outliers
+library(car)       # VIF
+library(earth)     # MARS model
+library(kernlab)   # SVM model
+library(xgboost)   # XGBoost model
+library(glmnet)    # Appendix Ridge Regression
+library(factoextra) # For advanced plotting
+library(pls)       # Appendix 2 PLS
+
+```
+
+<br>
+<hr>
+<br>
+
+# Data
+
+Here we import our train and test data, `student_train` and `student_eval`, and evaluate for missing data and additional exploratory steps.
+
+<br>
+
+## Data Acquisition
+
+Here we can preview the data structure:
+
+```{r, message=FALSE}
+
+# Read data
+student_train = read.csv('https://raw.githubusercontent.com/deepasharma06/Data-624/refs/heads/main/StudentData_training.csv')
+student_eval = read.csv('https://raw.githubusercontent.com/deepasharma06/Data-624/refs/heads/main/StudentEvaluation_test.csv')
+
+# Show data
+head(student_train) %>% kable()
+
+```
+
+<br>
+
+## Domain Dive
+
+We looked for a general understanding of bottling manufacturing and learned a few things potentially about our data, so these are our assumptions and guesses.
+
+This data describes a continuous bottling process, like a conveyor belt, and so `Mnf Flow` would be the percentage of intended speed the process is running at.  
+
+`Fill.Ounces` is how full the bottles bottles are being filled to with a target of 24 oz.
+
+`Alch.Rel` sounds like this could be an relative value of alcohol.  I checked and Modelo produces cans of 24 ounce spiked sparkling water, so maybe it's a similar product.
+
+`Brand.Code` could be in label only but if it's different formulas and flavors, the specific ratios of acids (citric, phosphoric, malic) to create the brand's flavor profile, then it would definitely affect PH.
+
+`PH` is the PH of our bottled beverage.  Curiously we would expect carbonated beverages to be acidic because carbon in water makes carbonic acid however all of the PH values are in the 8 range which is basic. 7 is neutral and below 7 would be acidic.
+
+`Mnf.Flow` seems to be the speed of the conveyor belt or manufacturing flow represented as a percentage of the ideal speed.  `MFR` could be the actual speed.
+
+`Carb.Volume`, `Carb.Pressure`, `Carb.Temp` we could potentially combine with the formula P*V/T to obtain the amount of carbon being injected into the liquid.
+
+`Bowl.Setpoint` is consistently 120 and we believe it's how high the bottle is expected to be filled.  `Filler.Level` is a variable close to 120 which is presumably the actual amount filled.  Dividing `Bowl.Setpoint` by `Filler Level` could agregate the predictors into whether too much or too little was added.
+
+`Filler.Speed` seems to be the speed at which the fill liquid is filled.  And `Carb.Flow` seems to be the speed at which the carbonation is injected.
+
+`Carb.Pressure1` and `Fill.Pressure` look to be the pressure at which the carbonation (~120) is injected into the fill liquid and the fill liquid's pressure (~46).  Those values make sense because if the C02's pressure is not higher than the liquid, the liquid won't carbonate.
+
+`Pressure.Setpoint` seems to be the setting for `Fill.Pressure` that the manufacturing process is trying to match.
+
+`Balling` is a reference to the Balling scale which was a way to determine how much sugar is in a syrup based on the density of the liquid.  `Balling.Lvl` is related.
+
+`Temperature` is in fahrenheit (~66) but isn't clear if that's the ambient temperature and should be aggregated with `Air.Pressurer` (~144) to get a sense of what the surrounding pressure is, which could influence how much carbonation stays in the bottle.
+
+`PSC.CO2` could be the purity of the carbon dioxide, variations in which would have a big impact on the final PH.  `PSC.Fill` could be the purity of the water. and `PSC` a combined metric of purity. But this is just a guess.
+
+This leaves a lot variables without a clear picture of how they fit into the manufacturing process:
+
+`PC.Volume`  
+`Hyd.Pressure1` `Hyd.Pressure2` `Hyd.Pressure3` `Hyd.Pressure4`  
+`Usage.cont` `Density` `Pressure.Vacuum` `Oxygen.Filler` `Carb.Rel`
+
+<br>
+
+## Missing values
+
+In total there are 724 missing values across 442 rows.
+
+17.2% of our rows have missing data (442/2571) so we won't just drop all rows with missing data.
+
+Here we show columns with the highest number of missing values:
+
+```{r}
+
+# There are 724 NA values
+#sum(is.na(student_train))
+
+# 442 rows have missing data
+#student_train %>%
+#  filter(if_any(everything(), is.na)) %>%
+#  nrow()
+
+# Display columns by missingness
+student_train %>%
+  summarise(across(everything(), ~ sum(is.na(.)), .names = "missing_{.col}")) %>%
+  pivot_longer(everything(), names_to = "Column", values_to = "Missing_Count") %>%
+  arrange(desc(Missing_Count))
+
+```
+
+<br>
+
+## Impute missing values (NAs)
+
+Here we impute the missing values using kNN and then check that the 724 missing values in `student_train` and the 366 missing values in `student_eval` are filled in.
+
+```{r}
+
+# Produce the model that can impute values using kNN
+imputeModel <- preProcess(student_train, method = c("knnImpute"))
+
+# Impute the missing values for the training and test data
+student_train <- predict(imputeModel, student_train)
+student_eval <- predict(imputeModel, student_eval)
+
+# There are now zero NA values in our train and test data
+sum(is.na(student_train))
+#sum(is.na(student_eval))
+
+```
+
+<br>
+
+## Correlation Plot
+
+In our correlation plot we are comparing values in the second to last `PH` column.  We note `Filler.Level` and `Bowl.Setpoint` which are highly collinear have some positive correlation with `PH`.  Also, a number of variables have negative correlation with `PH`, most notably `Mnf.Flow`, `Hyd.Pressure3`, and `Pressure.Setpoint`.
+
+```{r}
+# Select only numeric columns
+numeric_data <- student_train %>% select(where(is.numeric))
+
+# Calculate the correlation matrix ("pairwise.complete.obs" ensures any missing values won't affect the correlation calcs for remaining complete pairs)
+correlation_matrix <- cor(numeric_data, use = "pairwise.complete.obs") 
+
+# Create the correlation plot
+corrplot(correlation_matrix, tl.col = "black", tl.cex = 0.6, order = 'AOE') # color (tl.col) and size (tl.cex) help style the plot.
+```
+
+<br>
+
+## Distribution Visualization
+
+Here we show distributions of the variables as histograms.  Note, `Brand.Code` is excluded because it doesn't have the numeric data.
+
+```{r, warning=FALSE}
+
+# Melt the data
+mlt.train <- student_train  # Use your actual dataframe name
+mlt.train$ID <- rownames(mlt.train)  # Assign row names to ID
+mlt.train <- melt(mlt.train, id.vars = "ID")
+
+# Convert the value column to numeric
+mlt.train$value <- as.numeric(mlt.train$value)
+
+# Create histograms of the predictors
+ggplot(data = mlt.train, aes(x = value)) +
+  geom_histogram(binwidth = 6, fill = "skyblue", color = "black", alpha = 0.8) +  # Adjust binwidth as needed
+  facet_wrap(~ variable, scales = "free") +
+  labs(title = "Distributions of Predictors", x = "Predictors", y = "Frequency") +
+  theme_minimal(base_size = 9) +  # Use a minimal theme for better clarity
+  theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank())  # Clean up grid lines
+
+```
+
+<br>
+
+## Outliers
+
+We are seeing a lot of outliers in the boxplots, specifically for variables where the majority of their values are zero.  It's possible we will use near-zero variance filtering to resolve these.  Below only the first 9 of 32 are shown for display purposes but the pattern is the same.
+
+```{r, warning=FALSE}
+
+# Create boxplots for each numeric column
+numeric_columns <- names(student_train)[sapply(student_train, is.numeric)]
+plot_list <- lapply(numeric_columns[1:9], function(col) {
+  ggplot(student_train, aes_string(y = col)) +
+    geom_boxplot(outlier.color = "red", fill = "lightblue") +
+    ggtitle(paste("Boxplot of", col)) +
+    theme_minimal()
+})
+
+# Display all boxplots in a grid
+do.call(grid.arrange, c(plot_list, ncol = 3))
+
+```
+
+<br>
+<hr>
+<br>
+
+# Feature Engineering
+
+Here we use feature engineering and regression techniques to evaluate our feature set.
+
+<br>
+
+## Initial Linear Regression Model
+
+Here we build the initial linear regression model.
+
+```{r}
+
+# Setting up the model
+model <- lm(PH ~ ., data = student_train)
+summary(model)
+
+```
+
+<br>
+
+## Variance Inflation Factor (VIF)
+
+With the above initial linear regression model we can access the Variance Inflation Factor (VIF) to detect multicollinearity in our regression model to help us select features.
+
+Note, we see that `Brand.Code` is highly collinear.
+
+```{r}
+
+# Calculating VIF
+vif_values <- vif(model)
+vif_values
+
+```
+
+<br>
+
+## Near-Zero Variance
+
+Next we check if any of the variables have a near zero variance and surprisingly only one variable, `Hyd.Pressure1`, is identified by default.  We changed the parameters 'freqCut' and 'uniqueCut' but it required large changes to pick up the other variables, so we kept to only removing `Hyd.Pressure1`. 
+
+```{r}
+
+# Remove problematic predictors from train and test data
+student_train_x <- student_train[, -nearZeroVar(student_train)]
+student_eval_y <- student_eval[, -13]
+
+# Display extended list of NZV predictors
+nearZeroVar(student_train, freqCut = 60/40, uniqueCut = 40, names = TRUE)
+
+```
+
+<br>
+
+## Reduce Multicollinearity
+
+Three features, `Brand.Code`, `Balling`, and `Balling.Lvl`, have high multicollinearity which we will address in this section.
+
+<br>
+
+### Brand.Code
+
+Here we replace `Brand.Code` with `BCB` which will show if the record is brand code B or not.  When we reran for individual values of `Brand.Code`, we see that Brand B appears to have a different relationship than the other brands, Brand B has a R-squared of ~0.7 while all the other brands have a R-squared of ~0.3.  This suggests, we can replace all the brands with a binary variable of whether it is Brand B or not. (not pictured)
+
+From this we identify that `Balling` and `Balling.Lvl` represent a lot of the remaining multicollinearity to be reduced.
+
+```{r}
+
+# Replacing Brand.Code with BCB
+student_train_x1 <- student_train_x |> mutate(BCB = as.numeric(Brand.Code =='B')) |> select(-Brand.Code)
+student_eval_y1 <- student_eval_y |> mutate(BCB = as.numeric(Brand.Code =='B')) |> select(-Brand.Code)
+
+# New model with BCB instead of Brand.Code
+model <- lm(PH ~ ., data = student_train_x)
+#summary(model)
+
+# Calculating VIF
+vif_values <- vif(model)
+vif_values
+
+```
+
+<br>
+
+### Balling vs. Balling.Lvl
+
+In order to reduce the multicollinearity we are going to create a new predictor by dividing `Balling.Lvl` with `Balling`.
+
+The division was arrived at after trying different operations and division resulted in the best correlation to `PH` then removing either individually.
+
+For a guess at domain relevance, `Balling.Lvl` could be the target best value for the syrup's specific gravity and `Balling` could be the actual, so dividing the two would result in a value similar to `Mnf.Flow` which is a percentage of the ideal manufacturing conveyor belt speed.
+
+```{r}
+
+# Create new predictor PT
+student_train_x2 <- student_train_x1 |> mutate(PT = Balling.Lvl/Balling) |> select(-c(Balling, Balling.Lvl))
+student_eval_y2 <- student_eval_y1 |> mutate(PT = Balling.Lvl/Balling) |> select(-c(Balling, Balling.Lvl))
+
+```
+
+<br>
+
+## Interaction Terms
+
+We also considered creating a `Carbon` column by multiplying `Carb.Pressure` and `Carb.Volume` and dividing by `Carb.Temp`.  This is the Ideal Gas Law and would tell us how much carbon dioxide is being injected.  However there are two values for pressure, `Carb.Pressure` and `Carb.Pressure1` and we don't have the units to combine them according to the law.  From inspection they look like they've already been centered and scaled and so cannot be combined.
+
+<br>
+
+## Step-wise Reduction
+
+Since we've somewhat resolved our multicollinearity issue and have enough data we're going to try a step-wise reduction model.  This reduces our features to just the ones that have relevance for this model.  Since we're not relying on this to produce our final model but rather evaluating our features, step-wise reduction aligns with our goals and we don't need to try regularization instead.
+
+Note, our model has terrible performance with an R-Squared of ~0.41, but we've acquainted ourselves with the features and figured out how to resolve multicollinearity.
+
+```{r}
+
+# Fit a step-wise linear regression model
+model <- lm(PH ~ ., data = student_train_x2)
+model <- stats::step(model, trace = 0)
+summary(model)
+
+```
+
+<br>
+<hr>
+<br>
+
+# Initial MARS Model
+
+Here we produce a Multivariate Adaptive Regression Splines (MARS) model to capture some of these non-linear interactions in our data.
+
+<br>
+
+## Feature Selection
+
+We're using the features selected in the step-wise linear regression model.
+    
+```{r}
+
+# Features used in the previous step-wise linear regression model
+student_train_x3 <- student_train_x2 |>
+    select(PH, Fill.Ounces, PC.Volume, Carb.Temp, PSC, 
+    PSC.Fill, PSC.CO2, Mnf.Flow, Carb.Pressure1, Fill.Pressure, 
+    Hyd.Pressure2, Hyd.Pressure3, Filler.Level, Temperature, 
+    Usage.cont, Carb.Flow, Density, MFR, Oxygen.Filler, 
+    Bowl.Setpoint, Pressure.Setpoint, Alch.Rel, Carb.Rel, BCB)
+
+student_eval_y3 <- student_eval_y2 |> 
+    select(PH, Fill.Ounces, PC.Volume, Carb.Temp, PSC, 
+    PSC.Fill, PSC.CO2, Mnf.Flow, Carb.Pressure1, Fill.Pressure, 
+    Hyd.Pressure2, Hyd.Pressure3, Filler.Level, Temperature, 
+    Usage.cont, Carb.Flow, Density, MFR, Oxygen.Filler, 
+    Bowl.Setpoint, Pressure.Setpoint, Alch.Rel, Carb.Rel, BCB)
+
+```
+
+<br>
+
+## 1st Order MARS Model
+
+Here we run the initial MARS Model with only first order relationships.
+
+```{r}
+
+# Basic MARS Model
+y = student_train_x3$PH
+x = student_train_x3 |> select(-PH)
+marsFit <- earth(x, y)
+summary(marsFit)
+
+```
+
+<br>
+
+### Show Plots
+
+And here we show the partial dependence plots of the first order MARS model.
+
+```{r}
+
+# Plot partial dependencies
+plotmo(marsFit)
+
+```
+
+<br>
+
+## 2nd Order MARS Model
+
+Here we run the initial MARS Model with second order relationships.  This increased the R-squared from 0.475 to .489.
+
+```{r}
+
+y = student_train_x3$PH
+x = student_train_x3 |> select(-PH)
+
+y_eval = student_eval_y3$PH
+x_eval = student_eval_y3 |> select(-PH)
+
+marsFit2 <- earth(x, y, degree = 2)
+summary(marsFit2)
+
+```
+
+<br>
+
+### Show Plots
+
+```{r}
+
+# Partial dependence plots
+plotmo(marsFit2)
+
+```
+
+<br>
+
+## Overfitting
+
+When we originally completed the above model we got an R-Squared of 0.89 however upon subsequently running it with 10-fold cross validation we observed the initially high result was likely due to overfitting.  MARS models, especially with high orders of interactions, are susceptible to overfitting.
+
+We could duplicate that result by replacing the imputation of missing values with zeros, not removing the one feature with near-zero variance, and doing the balling vs. balling.lvl feature combination after the step-wise reduction.
+
+Instead, we're using our current model and will take a different tack starting in the next section.
+
+<br>
+<hr>
+<br>
+
+# Non-Linear Models
+
+Here we're doing a range of models to get a sense of what works.
+
+<br>
+
+## Data
+
+We're starting over on the data after the imputation step and removing the one near-zero variance predictor.
+
+<br>
+
+### Split up data
+
+Here we split up the data so that PH is our `trainy` and the remaining data is our `trainx`.  Similarly for our test data we have `testx` however there is no `PH` data for test.
+
+```{r}
+
+# Split up available data into train and test versions of x and y
+trainx <- student_train_x |> select(-PH)
+trainy <- student_train_x$PH
+testx <- student_eval_y |> select(-PH)
+
+```
+
+<br>
+
+### One-hot encoding
+
+We have one character variable `Brand.Code` that is categorial with no inherent order:
+
+Blank - 120
+A - 293
+B - 1239
+C - 304
+D - 615
+
+Here we set the Blanks to brand code `M` for miscellaneous and use one-hot encoding to split them up into five variables with a `1` in the column corresponding to which Brand Code that row is.
+
+```{r}
+
+# Assign blanks as "M"
+trainx$Brand.Code[trainx$Brand.Code == ""] <- "M"
+testx$Brand.Code[testx$Brand.Code == ""] <- "M"
+
+# Convert Brand.Code to a factor
+trainx$Brand.Code <- as.factor(trainx$Brand.Code)
+testx$Brand.Code <- as.factor(testx$Brand.Code)
+
+# One-hot encoding
+dummy_model <- dummyVars(~ ., data = trainx)
+trainx <- predict(dummy_model, trainx)
+testx <- predict(dummy_model, testx)
+
+```
+
+<br>
+
+## Modeling
+
+Here we look at the kNN, SVM, MARS, and XGBoost models.
+
+<br>
+
+### kNN
+
+k-Nearest Neighbors results in a weak model with an R-Squared of 0.481 when run with 13 as the number of nearest neighbors.  
+
+```{r}
+
+# Train the kNN model
+knnModel <- train(x = trainx,
+                  y = trainy,
+                  method = "knn",
+                  preProc = c("center", "scale"),
+                  tuneLength = 10)
+knnModel
+
+```
+
+<br>
+
+### Support Vector Machines
+
+Support Vector Machines results in a weak model with an Rsquared of 0.586 when C = 8.  The C being high like this means that misclassifications are penalized more heavily resulting in a more complex decision boundary.
+
+```{r}
+
+# Train the SVM model
+svmModel <- train(x = trainx,
+                  y = trainy,
+                  method = "svmRadial",
+                  preProc = c("center", "scale"),
+                  tuneLength = 14,
+                  trControl = trainControl(method = "cv"))
+svmModel
+
+```
+
+<br>
+
+### MARS
+
+Multivariate Adaptive Regression Splines results in a weak model with an Rsquared of 0.517 with nprune = 33 and degree = 6.  This means there are 33 basis functions with six-way interactions.  This may be suitable to highly nonlinear and interactive data but significantly risks overfitting.
+
+```{r}
+
+# Train the MARS model
+marsGrid <- expand.grid(.degree = 6, .nprune = 30:40)
+set.seed(175175327)
+marsModel <- train(x = trainx,
+                   y = trainy,
+                   method = "earth",
+                   tuneGrid = marsGrid,
+                   trControl = trainControl(method = "cv"))
+marsModel
+
+```
+
+<br>
+
+### XGBoost
+
+eXtreme Gradient Boosting also produced similarly weak results with an R-Squared of 0.455.
+
+```{r}
+library(caret)
+
+# Train XGBoost model using caret
+xgb_model <- train(
+  x = trainx,
+  y = trainy,
+  method = "xgbTree",
+  tuneLength = 1,  # Automatic hyperparameter tuning
+  trControl = trainControl(method = "cv", number = 10)  # Cross-validation
+)
+
+# Summary of the model
+print(xgb_model)
+
+```
+
+<br>
+<hr>
+<br>
+
+# Appendix 1
+
+Here we capture some related group work that followed a variant path to explore a ridge regression and a lasso regression model.
+
+<br>
+
+## Preprocessing
+
+Here we remove highly colinear variables, handle missing values and categorical predictors with one-hot encoding.
+
+<br>
+
+### Reduce Multicollinearity
+
+Removing variables with high VIF values (such as Brand.Code, Balling, and Density) to reduce multicollinearity.
+
+```{r}
+# Install and load the 'car' package
+#install.packages("car")
+library(car)
+
+# Check VIF for the current model
+vif(model)
+
+```
+
+```{r, results='hide'}
+# Refine the model by removing variables with high VIF (e.g., Brand.Code, Balling)
+model_refined <- lm(PH ~ . -Brand.Code -Balling, data = student_train)
+model_refined 
+# Check VIF again for the refined model
+vif_refine<-vif(model_refined)
+vif_refine
+
+```
+
+<br>
+
+### Missing Values
+
+Here we handle missing values with kNN imputation and check that there are zero remaining missing values:
+
+```{r}
+
+# Check if there are missing values in the entire dataset (none)
+#sum(is.na(student_train))
+
+# Impute missing values using kNN
+imputeModel <- preProcess(student_train, method = "knnImpute")
+
+# Apply the imputation to both training and test data
+student_train_imputed <- predict(imputeModel, student_train)
+student_eval_imputed <- predict(imputeModel, student_eval)
+
+# Check if there are any missing values after imputation (none)
+#sum(is.na(student_train_imputed))  # Should return 0 if imputation was successful
+#sum(is.na(student_eval_imputed))   # Should also return 0 for the test data
+
+# Prepare the predictor matrix (without the target variable 'PH')
+x <- as.matrix(student_train_imputed[, -which(names(student_train_imputed) == "PH")])
+
+# Check if there are missing values in the predictor matrix
+sum(is.na(x))  # This should return 0 if there are no missing values
+
+```
+
+<br>
+
+### One-Hot Encoding
+
+Here we use one-hot encoding to get dummy variables.
+
+```{r}
+# Remove PH column for dummy encoding
+student_train_predictors <- student_train_imputed[, -which(names(student_train_imputed) == "PH")]
+
+# Apply one-hot encoding to the predictors
+dummy_model <- dummyVars(~ ., data = student_train_predictors)
+
+# Apply the encoding to the dataset
+x <- predict(dummy_model, student_train_predictors)
+
+# Convert to matrix format
+x <- as.matrix(x)  
+
+# Should return 0 if there are no missing values (correct, none)
+#sum(is.na(x))  
+
+```
+
+<br>
+
+## Modeling
+
+Here we fit two models, ridge regression and lasso regression.
+
+<br>
+
+### Ridge Regression
+
+Here we run the ridge regression model.
+
+Note, the resulting coefficient of -0.031565321 for Carb.Volume means that as Carb.Volume increases by 1 unit, the PH decreases by 0.031565321, assuming all other predictors are held constant.
+
+Negative Coefficients: Features like Brand.Code, Carb.Volume, and Temperature are negatively correlated with PH, meaning as these features increase, the value of PH tends to decrease.
+
+Positive Coefficients: Features like Balling.Lvl and Oxygen.Filler are positively correlated with PH, meaning as these features increase, PH is predicted to increase as well.
+
+```{r}
+
+# Impute missing values using kNN
+imputeModel <- preProcess(student_train, method = "knnImpute")
+
+# Apply the imputation to both training and test data
+student_train_imputed <- predict(imputeModel, student_train)
+student_eval_imputed <- predict(imputeModel, student_eval)
+
+# Remove PH column for dummy encoding (exclude target variable)
+student_train_predictors <- student_train_imputed[, -which(names(student_train_imputed) == "PH")]
+
+# Apply one-hot encoding to the predictors
+dummy_model <- dummyVars(~ ., data = student_train_predictors)
+x <- predict(dummy_model, student_train_predictors)
+
+# Convert to matrix format (glmnet requires a matrix)
+x <- as.matrix(x)
+
+# Check if there are any missing values in the predictor matrix
+sum(is.na(x))  # Should return 0 if no missing values
+
+# Define target variable 'y'
+y <- student_train_imputed$PH
+
+# Fit Ridge Regression model (alpha = 0 for Ridge)
+ridge_model <- glmnet(x, y, alpha = 0)
+
+# View the coefficients
+#print(coef(ridge_model))
+
+# Perform cross-validation to find the best lambda
+cv_ridge <- cv.glmnet(x, y, alpha = 0) #Performs cross-validation to select the best regularization parameter (lambda).
+
+# Plot the cross-validation results
+plot(cv_ridge)
+
+# Get the best lambda from the cross-validation
+best_lambda <- cv_ridge$lambda.min # The lambda value that gives the minimum mean cross-validation error.
+cat("Best Lambda for Ridge:", best_lambda, "\n")
+
+# Refit the Ridge regression model with the best lambda
+ridge_model_best <- glmnet(x, y, alpha = 0, lambda = best_lambda)
+
+# Get the coefficients for the best model
+#coef(ridge_model_best) # Extracts the coefficients of the final Ridge model.
+
+```
+
+<br>
+
+### Ridge with Cross-Validation
+
+Here we seek to improve lambda tuning using cross-validation.
+
+Note, this resulted in a Mean Squared Error (MSE) of 0.5647799 for the best Ridge regression model which is a significant improvement compared to the previous MSE of 153.4756. This suggests that the model is now performing better in terms of prediction accuracy.
+
+The reduction in MSE after applying cross-validation and tuning the lambda parameter implies that the regularization parameter has been effectively optimized.
+
+```{r}
+# Use cross-validation to find the best lambda for Ridge regression
+cv_ridge <- cv.glmnet(x, y, alpha = 0)
+
+# Plot cross-validation results
+plot(cv_ridge)
+
+# Get the best lambda
+best_lambda <- cv_ridge$lambda.min
+cat("Best Lambda for Ridge:", best_lambda, "\n")
+
+# Refit the model with the best lambda
+ridge_model_best <- glmnet(x, y, alpha = 0, lambda = best_lambda)
+
+# Get the coefficients for the best Ridge model
+#coef(ridge_model_best)
+
+```
+
+<br>
+
+### Lasso Regression
+
+Here we run the lasso regression model.
+
+This results in some variables with a coefficient of zero.
+
+Non-zero Coefficients: These are the features that have been selected by Lasso. For example, Brand.Code, Carb.Volume, Carb.Pressure, etc., have non-zero coefficients, suggesting they have a relationship with PH.
+
+Zero Coefficients: Features like Carb.Volume and Filler.Level have been shrunk to zero, indicating that Lasso determined these features were not important in predicting PH.
+
+```{r}
+
+# Fit Lasso Regression model (alpha = 1 for Lasso)
+lasso_model <- glmnet(x, y, alpha = 1)
+
+# Use cross-validation to select the best lambda
+cv_lasso <- cv.glmnet(x, y, alpha = 1)
+
+# Plot the cross-validation results
+plot(cv_lasso)
+
+# Best lambda for Lasso
+best_lambda_lasso <- cv_lasso$lambda.min
+cat("Best Lambda for Lasso:", best_lambda_lasso, "\n")
+
+# Refit the model with the best lambda
+lasso_model_best <- glmnet(x, y, alpha = 1, lambda = best_lambda_lasso)
+
+# Get the coefficients for the best Lasso model
+#coef(lasso_model_best)
+
+```
+
+<br>
+<hr>
+<br>
+
+# Appendix 2
+
+Here we capture related group work that followed the same path of our initial data setup with kNN imputation, removing the near zero-variance feature `Hyd.Pressure1`, replacing `Brand.Code` with `BCB` for Brand code B or not, and creating a new variable `PT` out of `Balling.Lvl`/`Balling`.  Then picking up right before the stepwise reduction leading to our initial MARS model.
+
+Here we will use PCR/PLS for further feature reduction. 
+
+1. Do PCR and analyze (rsquared) 
+2. Do PLS, get optimal number of components using RMSEP, do PCR and analyze (rsquared) 
+
+<br>
+
+## PCA
+
+Here we produce the principal components.
+
+```{r }
+# Separate predictors and response
+X_train <- student_train_x2 %>% select(-PH)
+y_train <- student_train_x2$PH
+
+X_test <- student_eval_y2 %>% select(-PH)
+#y_test <- student_eval_y2$PH # test PH scores not available.
+
+# Scale the training and test sets
+# We'll use caret's preProcess for scaling
+preProcValues <- preProcess(X_train, method = c("center", "scale"))
+X_train_scaled <- predict(preProcValues, X_train)
+X_test_scaled  <- predict(preProcValues, X_test)
+
+# Perform PCA on the scaled training predictors
+pca_result <- prcomp(X_train_scaled, center = FALSE, scale. = FALSE)
+
+# Summary of PCA variance
+summary(pca_result)
+```
+
+<br>
+
+### Contributions of Variables
+
+The principal components are chosen based on max variability, we can crack open PC1 and PC2 to see which variables cover the widest range of variability and get a sense for how PCR would reduce multi-collinearity:
+
+```{r }
+# Contributions to PC1
+fviz_contrib(pca_result, choice = "var", axes = 1, top = 10) +
+  labs(title = "Contributions of Variables to PC1")
+```
+
+```{r }
+# Contributions to PC1
+fviz_contrib(pca_result, choice = "var", axes = 2, top = 10) +
+  labs(title = "Contributions of Variables to PC2")
+
+```
+
+<br>
+
+## PCR
+
+On to PCR: 
+
+```{r }
+
+# Set a seed for reproducibility
+set.seed(123)
+
+# Using the already processed data 'student_train_x2'
+# Ensure that PH is the response and the rest are predictors
+pcr_model <- pcr(PH ~ ., data = student_train_x2, scale = TRUE,  validation = "CV")   
+
+# Summary of the PCR model
+summary(pcr_model)
+
+```
+
+<br>
+
+### PCR Plot
+
+```{r}
+# Plot the cross-validation results using validationplot()
+
+# val.type options: "MSEP", "RMSEP", "R2"
+validationplot(pcr_model, val.type = "RMSEP", main = "PCR Cross-Validation (RMSEP)")
+```
+
+<br>
+
+### Show PCR RMSEP
+
+```{r }
+# Print RMSEP for each number of components
+rmsep_values <- RMSEP(pcr_model, estimate = "CV")
+rmsep_values
+```
+
+<br>
+
+### PCR R2 Plot
+
+```{r }
+# Also check R² to see how well the model explains the variance
+validationplot(pcr_model, val.type = "R2", main = "PCR Cross-Validation (R2)")
+```
+
+<br>
+
+### PCR R2 Table
+
+It looks like 5 components gives us both the highest R2 and lowest RMSEP before the model sharply drops in performance. It does improve again at 20 components, but for the sake of having a simpler model we will stick to 5. 
+
+```{r }
+# Print out R2 for each number of components
+r2_values <- R2(pcr_model, estimate = "CV")
+r2_values
+```
+
+<br>
+
+### PCR Model
+
+The results with PCR are lackluster.
+
+```{r }
+library(pls)
+
+# Set a seed for reproducibility
+set.seed(123)
+
+# Fit the PCR model with exactly 5 components
+pcr_model_5 <- pcr(PH ~ ., 
+                   data = student_train_x2, 
+                   scale = TRUE, 
+                   ncomp = 5, 
+                   validation = "CV")
+
+# Print summary of the model
+summary(pcr_model_5)
+
+# Extract R2 and RMSEP for cross-validation
+r2_5 <- R2(pcr_model_5, estimate = "CV")
+rmsep_5 <- RMSEP(pcr_model_5, estimate = "CV")
+
+
+# If you have a test set (student_eval_y2) and want to make predictions:
+
+predictions_5 <- predict(pcr_model_5, newdata = student_eval_y2, ncomp = 5)
+  
+# Calculate prediction metrics on the test set
+test_res <- postResample(predictions_5, student_eval_y2$PH)
+cat("\nTest set performance (using 5 components):\n")
+print(test_res)
+
+    # RMSE       0.6155150 
+    # Rsquared   0.2832964
+    # MAE        0.5087567 
+```
+
+<br>
+
+## PLS
+
+on to PLS:
+
+```{r }
+library(pls)
+
+set.seed(123) # For reproducibility
+
+# 1. Make the PLS model using cross-validation
+pls_model <- plsr(PH ~ ., 
+                  data = student_train_x2,
+                  scale = TRUE,          # Scale predictors
+                  validation = "CV")     # Use cross-validation
+
+# Print a summary of the model to see initial info
+summary(pls_model)
+```
+
+<br>
+
+### PLS RMSEP Plot
+
+```{r }
+# Using validationplot to check RMSEP across components
+validationplot(pls_model, val.type = "RMSEP", main = "PLS: CV RMSEP by Number of Components")
+# This plot helps visualize how RMSEP changes as we increase the number of components.
+```
+
+<br>
+
+### PLS R2 Plot
+
+```{r }
+validationplot(pls_model, val.type = "R2", main = "PLS: CV R2 by Number of Components")
+
+```
+
+<br>
+
+### PLS Model
+
+We arrive at a PLS Model with an R2 of 43.43%.
+
+```{r }
+# Check R² via R2() function and RMSEP via RMSEP() function
+r2_values_pls <- R2(pls_model, estimate = "CV")
+rmsep_values_pls <- RMSEP(pls_model, estimate = "CV")
+```
+
+```{r }
+r2_values <- r2_values_pls$val["CV", "PH", ]
+r2_comps <- r2_values[-1]
+
+rmse_values <- rmsep_values_pls$val["CV", "PH", ]
+rmsep_comps <- rmse_values[-1]
+```
+
+```{r }
+# Identify the best number of components based on minimum RMSEP
+opt_comp_rmsep <- which.min(rmsep_comps)
+min_rmsep <- rmsep_comps[opt_comp_rmsep]
+
+# Identify the best number of components based on max R²
+opt_comp_r2 <- which.max(r2_comps)
+max_r2 <- r2_comps[opt_comp_r2]
+
+cat("\nOptimal number of components based on RMSEP:", opt_comp_rmsep, "with RMSEP =", min_rmsep, "\n")
+cat("Optimal number of components based on R²:", opt_comp_r2, "with R² =", max_r2, "\n")
+
+# Let's choose the optimal number of components. In practice, you might consider a balance 
+# between minimal RMSEP and complexity. Here, let's use the one chosen by RMSEP for demonstration.
+final_ncomp <- opt_comp_rmsep
+
+cat("\nFinal chosen number of components:", final_ncomp, "\n")
+
+# 4. Make a final PLS model with the chosen number of components and evaluate it
+pls_model_final <- plsr(PH ~ ., 
+                        data = student_train_x2,
+                        scale = TRUE,
+                        ncomp = final_ncomp,
+                        validation = "none") # no need for CV here since we fixed ncomp
+
+# Summary of the final model
+summary(pls_model_final)
+
+preds_pls <- predict(pls_model_final, newdata = student_eval_y2, ncomp = final_ncomp)
+  
+results_test <- postResample(preds_pls, student_eval_y2$PH)
+cat("\nTest set performance with", final_ncomp, "components:\n")
+print(results_test)
+
+# RMSE     0.5593341
+# Rsquared 0.4342728       
+# MAE      0.4397250
+```
+
+<br>
+
+### X-Loadings
+
+X-Loadings indicate how the original predictors are combined linearly to form the PLS components. A higher absolute loading value means the predictor strongly influences that component.
+
+```{r }
+# View the X-loadings
+x_loadings <- pls_model_final$loadings
+cat("X-loadings:\n")
+# print(x_loadings)
+
+# View the X-loading weights
+x_loading_weights <- pls_model_final$loading.weights
+cat("\nX-loading weights:\n")
+# print(x_loading_weights)
+
+# Convert to data frames for easier handling
+x_loadings_matrix <- unclass(pls_model_final$loadings)
+x_loadings_df <- as.data.frame(x_loadings_matrix)
+
+x_loadings_weights_matrix <- unclass(pls_model_final$loading.weights)
+x_loading_weights_df <- as.data.frame(x_loadings_matrix)
+
+# Rename columns for clarity: each column corresponds to a component
+colnames(x_loadings_df) <- paste0("Comp", 1:ncol(x_loadings_df))
+colnames(x_loading_weights_df) <- paste0("Comp", 1:ncol(x_loading_weights_df))
+
+# Let's also see the coefficients for each number of components
+coefficients_array <- pls_model_final$coefficients
+# `coefficients_array` is a multidimensional array: [predictor, response, component]
+# For a single response model, we can simplify it:
+coefficients_matrix <- coefficients_array[,1,] # Extract for the single response variable
+colnames(coefficients_matrix) <- paste0("Comp", 1:ncol(coefficients_matrix))
+
+cat("\nCoefficients for each component:\n")
+#print(coefficients_matrix)
+
+# Visualizing Loadings
+# As with PCA, you can plot the loadings to see which predictors have strong influence on each component.
+library(reshape2)
+library(ggplot2)
+
+# Melt the loadings data frame for plotting
+x_loadings_long <- melt(x_loadings_df, variable.name = "Component", value.name = "Loading")
+x_loadings_long$Variable <- rownames(x_loadings_df)
+
+ggplot(x_loadings_long, aes(x = reorder(Variable, Loading), y = Loading, fill = Component)) +
+  geom_bar(stat="identity", position="dodge") +
+  coord_flip() +
+  facet_wrap(~ Component, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "PLS X-Loadings by Component", x = "Predictors", y = "Loading")
+
+
+```
+
+<br>
+
+### PLS Coefficients
+
+Coefficients show how each predictor contributes to predicting the response variable when using a given number of components. Higher absolute coefficients indicate greater influence of a predictor on the predicted outcome.
+
+```{r }
+# Extract the coefficients matrix from the PLS model
+coefficients_array <- pls_model_final$coefficients
+coefficients_matrix <- coefficients_array[, 1, ] # For a single-response model
+colnames(coefficients_matrix) <- paste0("Comp", 1:ncol(coefficients_matrix))
+
+# Convert to a data frame
+coefficients_df <- as.data.frame(coefficients_matrix)
+coefficients_df$Variable <- rownames(coefficients_df)
+
+# Reshape to long format for plotting
+library(reshape2)
+coefficients_long <- melt(coefficients_df, id.vars = "Variable", 
+                          variable.name = "Component", value.name = "Coefficient")
+
+# Plot using ggplot2, faceting by Component
+library(ggplot2)
+ggplot(coefficients_long, aes(x = reorder(Variable, Coefficient), y = Coefficient, fill = Component)) +
+  geom_bar(stat="identity", position="dodge") +
+  coord_flip() +
+  facet_wrap(~ Component, scales = "free_y") +
+  theme_minimal() +
+  labs(title = "PLS Coefficients by Component",
+       x = "Predictor Variables",
+       y = "Coefficient") +
+  theme(legend.position = "none")
+
+```
+
+<br>
+
+## Analysis
+
+The good thing about using PLS is that the multi-colinearity is addressed along with predictive power. The components or latent variables are chosen such that the covariance between predictors is maximized, and each component is orthogonal to the ones prior so the correlation between components is also minimized. 
+
+Each predictor is also weighed differently in each component it appears in based on its effect on the target variable. 
+Some next steps we can take are to look at which predictors have consistently low coefficients/loadings and remove them- this could possibly improve the performance of the model. 
+
+PT:
+Coefficients: Around ±0.001 to ±0.007 across all components, never exceeding about 0.0075 in absolute value. These are very small relative to other variables that have coefficients in the 0.05–0.4 range.
+Loadings: PT does not appear to strongly load on any component (not listed or near zero in the given snippet).
+
+Air.Pressurer:
+Coefficients: About -0.003 to -0.013 across all components. These values are also quite small compared to other more influential variables.
+Loadings: Only appears once at about -0.114, which is not large. Most important variables have loadings at least above ±0.2–0.3 somewhere.
+
+Carb.Temp:
+Coefficients: Ranging around 0.0059 to 0.0158, slightly larger than PT or Air.Pressurer but still relatively small. Some variables show coefficients well above 0.05 or even 0.1.
+Loadings: Carb.Temp does not appear with a noticeable loading in the snippet (it’s blank), suggesting it may not be significantly influencing the latent structure.
+
+<br>
+
+## Refined PLS
+
+Here we run PLS with fewer predictors based on the analysis above.
+
+```{r }
+library(pls)
+
+# Remove the chosen predictors from the dataset
+predictors_to_remove <- c("PT", "Air.Pressurer", "Carb.Temp")
+
+student_train_reduced <- student_train_x2[ , !(names(student_train_x2) %in% predictors_to_remove)]
+
+# Fit a PLS model again with cross-validation
+set.seed(123)
+pls_model_reduced <- plsr(PH ~ ., 
+                          data = student_train_reduced,
+                          scale = TRUE,
+                          validation = "CV")
+
+# Check summary
+summary(pls_model_reduced)
+
+
+r2_values_reduced <- R2(pls_model_reduced, estimate = "CV")
+rmsep_values_reduced <- RMSEP(pls_model_reduced, estimate = "CV")
+
+
+
+cat("\nCross-validated R² values after removal:\n")
+cat("\nCross-validated RMSEP values after removal:\n")
+
+# Visualize MSEP to see if there's an improvement
+validationplot(pls_model_reduced, val.type = "MSEP", main = "PLS with Reduced Predictors: CV MSEP by #Components")
+
+# Identify optimal number of components in the reduced model based on RMSEP
+
+r2_values_reduced_mod <- r2_values_reduced$val["CV", "PH", ]
+r2_comps_reduced <- r2_values_reduced_mod[-1]
+
+rmse_values_reduced_mod <- rmsep_values_reduced$val["CV", "PH", ]
+rmsep_comps_reduced <- rmse_values_reduced_mod[-1]
+
+opt_comp_rmsep_reduced <- which.min(rmsep_comps_reduced)
+min_rmsep_reduced <- rmsep_comps_reduced[opt_comp_rmsep_reduced]
+opt_comp_r2_reduced <- which.max(r2_comps_reduced)
+max_r2_reduced <- r2_comps_reduced[opt_comp_r2_reduced]
+
+cat("\nAfter predictor removal:\n")
+cat("Optimal #Components by RMSEP:", opt_comp_rmsep_reduced, "with RMSEP =", min_rmsep_reduced, "\n")
+cat("Optimal #Components by R²:", opt_comp_r2_reduced, "with R² =", max_r2_reduced, "\n")
+
+```
+
+<br>
+
+### Results
+
+There was a small lift in Rsquared after removing some of the less relevant predictors. 
+
+Rsquared: 
+
+PCR:  0.2832964
+PLS:  0.4342728
+PLS with some predictors removed: 0.4452060
+
+```{r }
+# Fit the final model with the chosen number of components
+final_pls_model <- plsr(PH ~ ., 
+                        data = student_train_reduced,
+                        scale = TRUE,
+                        ncomp = opt_comp_rmsep_reduced,
+                        validation = "none")
+
+# Check summary
+summary(final_pls_model)
+
+# Predict on the test set
+preds_final <- predict(final_pls_model, newdata = student_eval_y2, ncomp = opt_comp_rmsep_reduced)
+  
+test_performance <- postResample(preds_final, student_eval_y2$PH)
+cat("\nTest set performance (RMSE, R2, MAE):\n")
+print(test_performance)
+
+# RMSE      0.5562690
+# Rsquared  0.4452060
+# MAE        0.4302488 
+```
+
+<br>
+<hr>
+<br>
+
+
+
+
